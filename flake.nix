@@ -7,7 +7,7 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+    (flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
       in
@@ -23,5 +23,12 @@
             just
           ];
         };
-      });
+      }))
+    // {
+      homeManagerModules.default = { lib, pkgs, ... }: {
+        imports = [ ./nix/home-manager.nix ];
+        config.services.agent-telegram-bot.package =
+          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+      };
+    };
 }

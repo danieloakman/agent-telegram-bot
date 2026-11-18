@@ -38,14 +38,25 @@ nix build
 nix develop
 ```
 
-As a flake input:
+### Flake input + Home Manager
 
 ```nix
 {
   inputs.agent-telegram-bot.url = "github:danieloakman/agent-telegram-bot";
-  # packages.${system}.default
+
+  # In a home-manager module / user config:
+  imports = [ inputs.agent-telegram-bot.homeManagerModules.default ];
+
+  services.agent-telegram-bot = {
+    enable = true;
+    chatIds = [ 123456789 ];
+    allowedUserIds = [ 123456789 ];
+    tokenFile = config.sops.secrets.agent_telegram_bot_token.path; # or any token file
+  };
 }
 ```
+
+`package` defaults to this flake’s build; override if needed. Secrets (sops/agenix) stay in the consumer flake.
 
 ## Develop
 
