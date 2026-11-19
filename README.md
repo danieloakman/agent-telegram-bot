@@ -26,10 +26,11 @@ Message body can be a positional argument or stdin.
 |----------|---------|
 | `AGENT_TELEGRAM_BOT_TOKEN_FILE` | Path to Bot API token file |
 | `AGENT_TELEGRAM_BOT_SETTINGS` | JSON settings: `{ "chatIds": [...], "allowedUserIds": [...] }` |
-| `STATE_DIRECTORY` | State dir (socket + persisted state); set by systemd `StateDirectory=` |
+| `STATE_DIRECTORY` | Daemon only: state dir (socket + persisted state); set by systemd `StateDirectory=` |
 | `AGENT_TELEGRAM_BOT_SOCKET` | Optional override for the control socket path |
 
-Default socket: `$STATE_DIRECTORY/agent-telegram-bot.sock`, or `~/.local/state/agent-telegram-bot/agent-telegram-bot.sock`.
+Daemon socket: `$STATE_DIRECTORY/agent-telegram-bot.sock` (or `AGENT_TELEGRAM_BOT_SOCKET`).
+CLI send/ask/ping ignore `STATE_DIRECTORY` and use `AGENT_TELEGRAM_BOT_SOCKET` or `~/.local/state/agent-telegram-bot/agent-telegram-bot.sock`, so a foreign systemd unit's `STATE_DIRECTORY` cannot poison the client.
 
 ## Nix
 
