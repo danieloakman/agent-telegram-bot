@@ -119,7 +119,8 @@ fn client_call(request: Request) -> Result<(), String> {
 }
 
 fn raw_call(request: Request) -> Result<Response, String> {
-    let socket = socket_path()?;
+    // CLI must not inherit a foreign STATE_DIRECTORY (e.g. another systemd unit).
+    let socket = socket_path(/* prefer_state_directory */ false)?;
     ipc::call(&socket, &request)
 }
 
@@ -134,7 +135,7 @@ fn run_daemon() -> Result<(), String> {
     let settings = Settings::load(Path::new(&env_var("AGENT_TELEGRAM_BOT_SETTINGS")?))?;
     let state_dir = env_var("STATE_DIRECTORY")?;
     let state = Shared::load(Path::new(&state_dir))?;
-    let socket = socket_path()?;
+    let socket = socket_path(/* prefer_state_directory */ true)?;
     let app = Arc::new(App::new(settings, Telegram::new(token)));
 
     let app_ipc = Arc::clone(&app);
@@ -149,12 +150,14 @@ fn run_daemon() -> Result<(), String> {
     app.run_poll(state)
 }
 
-fn socket_path() -> Result<PathBuf, String> {
+fn socket_path(prefer_state_directory: bool) -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("AGENT_TELEGRAM_BOT_SOCKET") {
         return Ok(PathBuf::from(path));
     }
-    if let Ok(state) = std::env::var("STATE_DIRECTORY") {
-        return Ok(PathBuf::from(state).join("agent-telegram-bot.sock"));
+    if prefer_state_directory {
+        if let Ok(state) = std::env::var("STATE_DIRECTORY") {
+            return Ok(PathBuf::from(state).join("agent-telegram-bot.sock"));
+        }
     }
     let home = std::env::var("HOME").map_err(|_| String::from("HOME is not set"))?;
     let state_home =
