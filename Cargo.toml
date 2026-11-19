@@ -2,6 +2,12 @@
 name = "agent-telegram-bot"
 version = "0.1.0"
 edition = "2021"
+description = "Notify/ask bridge for agents via Telegram"
+license = "MIT"
+repository = "https://github.com/danieloakman/agent-telegram-bot"
+readme = "README.md"
+keywords = ["telegram", "bot", "agent", "automation"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }

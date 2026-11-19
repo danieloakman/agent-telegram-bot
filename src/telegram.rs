@@ -60,3 +60,21 @@ fn clip(text: &str) -> String {
     }
     clipped
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clip_leaves_short_text() {
+        assert_eq!(clip("hello"), "hello");
+    }
+
+    #[test]
+    fn clip_truncates_long_text() {
+        let long: String = "あ".repeat(TEXT_LIMIT + 10);
+        let clipped = clip(&long);
+        assert_eq!(clipped.chars().count(), TEXT_LIMIT + 1);
+        assert!(clipped.ends_with('…'));
+    }
+}

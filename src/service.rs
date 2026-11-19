@@ -70,10 +70,9 @@ impl App {
             if let Some(ask_id) = state.ask_id_for_message(reply.message_id) {
                 let answer = strip_answer_prefix(text).to_string();
                 if state.complete_ask(&ask_id, Ok(answer.clone())) {
-                    let _ = self.telegram.send(
-                        chat_id,
-                        &format!("✅ recorded answer for `{ask_id}`"),
-                    );
+                    let _ = self
+                        .telegram
+                        .send(chat_id, &format!("✅ recorded answer for `{ask_id}`"));
                 }
                 return Ok(());
             }
@@ -143,7 +142,7 @@ impl App {
             role: role.unwrap_or("agent").to_string(),
             chat_id,
             message_id,
-            created: now_rfc3339(),
+            created: now_unix_secs(),
         };
         let waiter = state.register_ask(ask);
         match Shared::wait_for_answer(&waiter, timeout) {
@@ -167,9 +166,9 @@ impl App {
 fn format_message(role: Option<&str>, text: &str, ask_id: Option<&str>) -> String {
     let role = role.unwrap_or("agent");
     match ask_id {
-        Some(id) => format!(
-            "[{role}] ask `{id}`\n\n{text}\n\nReply to this message, or `/a <answer>`."
-        ),
+        Some(id) => {
+            format!("[{role}] ask `{id}`\n\n{text}\n\nReply to this message, or `/a <answer>`.")
+        }
         None => format!("[{role}]\n{text}"),
     }
 }
@@ -186,10 +185,43 @@ fn short_id() -> String {
     uuid[..8].to_string()
 }
 
-fn now_rfc3339() -> String {
+fn now_unix_secs() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{secs}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_message_notice() {
+        assert_eq!(
+            format_message(Some("vuln-monitor"), "build finished", None),
+            "[vuln-monitor]\nbuild finished"
+        );
+    }
+
+    #[test]
+    fn format_message_ask_includes_id_and_hint() {
+        let body = format_message(Some("agent"), "Ship it?", Some("abcd1234"));
+        assert!(body.starts_with("[agent] ask `abcd1234`"));
+        assert!(body.contains("Ship it?"));
+        assert!(body.contains("/a <answer>"));
+    }
+
+    #[test]
+    fn format_message_default_role() {
+        assert_eq!(format_message(None, "hi", None), "[agent]\nhi");
+    }
+
+    #[test]
+    fn strip_answer_prefix_variants() {
+        assert_eq!(strip_answer_prefix("/a yes"), "yes");
+        assert_eq!(strip_answer_prefix("/answer yes"), "yes");
+        assert_eq!(strip_answer_prefix("plain"), "plain");
+    }
 }

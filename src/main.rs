@@ -17,7 +17,10 @@ use crate::state::Shared;
 use crate::telegram::Telegram;
 
 #[derive(Debug, Parser)]
-#[command(name = "agent-telegram-bot", about = "Notify/ask bridge for agents via Telegram")]
+#[command(
+    name = "agent-telegram-bot",
+    about = "Notify/ask bridge for agents via Telegram"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

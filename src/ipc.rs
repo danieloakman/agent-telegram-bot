@@ -141,8 +141,12 @@ fn handle_client(stream: UnixStream, app: &App, state: &Shared) -> Result<(), St
             text,
             role,
             timeout_sec,
-        } => match app.ask(role.as_deref(), &text, Duration::from_secs(timeout_sec), state)
-        {
+        } => match app.ask(
+            role.as_deref(),
+            &text,
+            Duration::from_secs(timeout_sec),
+            state,
+        ) {
             Ok((ask_id, answer)) => Response::ok_ask(ask_id, answer),
             Err(err) => Response::err(err),
         },
@@ -164,4 +168,61 @@ pub fn call(socket: &Path, request: &Request) -> Result<Response, String> {
         .read_line(&mut line)
         .map_err(|err| format!("reading response: {err}"))?;
     serde_json::from_str(line.trim()).map_err(|err| format!("parsing response: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_send_round_trip() {
+        let request = Request::Send {
+            text: "hello".into(),
+            role: Some("agent".into()),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""cmd":"send""#));
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Request::Send { text, role } => {
+                assert_eq!(text, "hello");
+                assert_eq!(role.as_deref(), Some("agent"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_ask_default_timeout() {
+        let parsed: Request =
+            serde_json::from_str(r#"{"cmd":"ask","text":"Ship it?","role":"agent"}"#).unwrap();
+        match parsed {
+            Request::Ask {
+                text,
+                role,
+                timeout_sec,
+            } => {
+                assert_eq!(text, "Ship it?");
+                assert_eq!(role.as_deref(), Some("agent"));
+                assert_eq!(timeout_sec, 600);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn response_ok_ask_serializes_camel_case() {
+        let response = Response::ok_ask("abcd1234".into(), "yes".into());
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains(r#""askId":"abcd1234""#));
+        assert!(json.contains(r#""answer":"yes""#));
+        assert!(!json.contains("message_id"));
+    }
+
+    #[test]
+    fn response_err_omits_optional_fields() {
+        let response = Response::err("nope");
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(json, r#"{"ok":false,"error":"nope"}"#);
+    }
 }

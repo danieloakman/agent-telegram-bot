@@ -53,17 +53,22 @@ nix develop
     chatIds = [ 123456789 ];
     allowedUserIds = [ 123456789 ];
     tokenFile = config.sops.secrets.agent_telegram_bot_token.path; # or any token file
+    # optional:
+    # socketPath = "/run/user/1000/agent-telegram-bot.sock";
+    # extraEnvironment = { RUST_LOG = "info"; };
   };
 }
 ```
 
-`package` defaults to this flake’s build; override if needed. Secrets (sops/agenix) stay in the consumer flake.
+`package` defaults to this flake’s build; override if needed. Secrets (sops/agenix) stay in the consumer flake. Overlay: `overlays.default` exposes `pkgs.agent-telegram-bot`.
 
 ## Develop
 
 ```bash
-just build
+nix develop   # or: direnv allow
+just check
 just test
+just clippy
 just fmt
 ```
 
