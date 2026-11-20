@@ -1,3 +1,4 @@
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -5,7 +6,9 @@ use frankenstein::types::Message;
 use frankenstein::updates::{Update, UpdateContent};
 use uuid::Uuid;
 
-use crate::settings::Settings;
+use crate::commands;
+use crate::proc;
+use crate::settings::{RunnableCommand, Settings};
 use crate::state::{PendingAsk, Shared};
 use crate::telegram::Telegram;
 
@@ -112,10 +115,68 @@ impl App {
             return Ok(());
         }
 
-        if text == "/help" && self.settings.features.builtin_help {
-            let _ = self.telegram.send(chat_id, &self.help_text());
+        let uid = user_id.map(|id| id as i64);
+
+        if let Some((name, args)) = commands::split_slash(text) {
+            if name == "help" && self.settings.features.builtin_help {
+                let _ = self.telegram.send(chat_id, &self.help_text());
+                return Ok(());
+            }
+            if let Some((primary, command)) = commands::resolve_command(&self.settings, &name) {
+                let reply = self.run_command(primary, &command.run, &args, chat_id, uid);
+                let _ = self.telegram.send(chat_id, &reply);
+                return Ok(());
+            }
+            let _ = self
+                .telegram
+                .send(chat_id, &format!("Unknown command /{name}. Try /help."));
+            return Ok(());
         }
+
+        // Free-form message (no slash): optional defaultCommand.
+        if let Some(default) = &self.settings.default_command {
+            let reply = self.run_command("default", default, text, chat_id, uid);
+            let _ = self.telegram.send(chat_id, &reply);
+        }
+
         Ok(())
+    }
+
+    fn run_command(
+        &self,
+        label: &str,
+        command: &RunnableCommand,
+        args: &str,
+        chat_id: i64,
+        user_id: Option<i64>,
+    ) -> String {
+        let argv = commands::split_args(args);
+        log::info!("running {label} command={} args={argv:?}", command.command);
+        let mut cmd = Command::new(&command.command);
+        cmd.args(&argv);
+        cmd.env("TELEGRAM_BOTS_INSTANCE", &self.settings.instance);
+        cmd.env("TELEGRAM_BOTS_COMMAND", label);
+        cmd.env("TELEGRAM_BOTS_CHAT_ID", chat_id.to_string());
+        cmd.env("TELEGRAM_BOTS_TIMEZONE", &self.settings.timezone);
+        if let Some(uid) = user_id {
+            cmd.env("TELEGRAM_BOTS_USER_ID", uid.to_string());
+        }
+        let context = serde_json::to_string(&self.settings.context).unwrap_or_else(|_| "{}".into());
+        cmd.env("TELEGRAM_BOTS_CONTEXT", context);
+        for (key, value) in &command.env {
+            cmd.env(key, value);
+        }
+        match proc::run(cmd, Duration::from_secs(command.timeout_sec)) {
+            Ok(output) => {
+                let text = output.stdout.trim();
+                if text.is_empty() {
+                    format!("✅ {label} done.")
+                } else {
+                    text.to_string()
+                }
+            }
+            Err(err) => format!("❌ {label} failed: {err}"),
+        }
     }
 
     fn help_text(&self) -> String {
@@ -134,6 +195,10 @@ impl App {
                     lines.push(format!("/{name} — {}", command.description));
                 }
             }
+        }
+        if self.settings.default_command.is_some() {
+            lines.push(String::new());
+            lines.push("Free-form messages are also handled.".into());
         }
         lines.join("\n")
     }

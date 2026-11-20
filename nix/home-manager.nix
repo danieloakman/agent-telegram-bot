@@ -55,7 +55,7 @@ let
       timezone = lib.mkOption {
         type = lib.types.str;
         default = "UTC";
-        description = "IANA timezone for interpreters and command events.";
+        description = "IANA timezone passed to command scripts as TELEGRAM_BOTS_TIMEZONE.";
       };
 
       socketPath = lib.mkOption {
@@ -81,8 +81,8 @@ let
         type = lib.types.attrs;
         default = { };
         description = ''
-          Opaque JSON object copied into every command stdin event (payers,
-          calendar ids, spreadsheet helpers, …). Ignored when commands = {}.
+          Opaque JSON object exported to command scripts as TELEGRAM_BOTS_CONTEXT
+          (payers, calendar ids, …).
         '';
       };
 
@@ -92,33 +92,48 @@ let
         description = "Auto-handle /help from command descriptions.";
       };
 
-      interpreter = {
-        enable = lib.mkOption {
-          type = lib.types.bool;
-          default = false;
-          description = "Route free-form / failed parses through an external interpreter.";
-        };
-        package = lib.mkOption {
-          type = lib.types.nullOr lib.types.package;
-          default = null;
-          description = "Interpreter package (e.g. cursor-agent). Required when enable.";
-        };
-        workspace = lib.mkOption {
-          type = lib.types.nullOr lib.types.str;
-          default = null;
-          description = "Workspace path passed to the interpreter.";
-        };
-        extraArgs = lib.mkOption {
-          type = lib.types.listOf lib.types.str;
-          default = [ "-p" "--mode" "ask" "--trust" ];
-          description = "Args before --workspace / prompt.";
-        };
+      defaultCommand = lib.mkOption {
+        type = lib.types.nullOr (lib.types.submodule runnableModule);
+        default = null;
+        description = ''
+          Optional runner for free-form messages (no leading /). Same package
+          + argv contract as commands; TELEGRAM_BOTS_COMMAND=default.
+        '';
       };
 
       commands = lib.mkOption {
         type = lib.types.attrsOf (lib.types.submodule commandModule);
         default = { };
         description = "Slash commands (key = primary name, no leading /).";
+      };
+    };
+  };
+
+  runnableModule = {
+    options = {
+      package = lib.mkOption {
+        type = lib.types.package;
+        example = lib.literalExpression ''
+          pkgs.writeShellScriptBin "brown-fam-default" '''
+            set -euo pipefail
+            # free-form "trotty paid 40 lunch" → "$1"=trotty "$2"=paid …
+            echo "got: $*"
+          '''
+        '';
+        description = ''
+          Executable (typically writeShellScriptBin). Message words are
+          appended as argv.
+        '';
+      };
+      timeoutSec = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 60;
+        description = "Kill the process group after this many seconds.";
+      };
+      env = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = { };
+        description = "Extra environment for this runner only.";
       };
     };
   };
@@ -135,19 +150,19 @@ let
         default = [ ];
         description = "Alternate slash names (e.g. calendar for cal).";
       };
-      confirm = lib.mkOption {
-        type = lib.types.bool;
-        default = true;
-        description = "Require inline Confirm before running exec.";
-      };
-      exec = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
-        description = "Argv to run (e.g. [ (lib.getExe pkg) \"add\" ]).";
-      };
-      passArgs = lib.mkOption {
-        type = lib.types.bool;
-        default = true;
-        description = "Append the raw slash-args string as one final argv element.";
+      package = lib.mkOption {
+        type = lib.types.package;
+        example = lib.literalExpression ''
+          pkgs.writeShellScriptBin "brown-fam-expense" '''
+            set -euo pipefail
+            # argv from "/expense 15 coffee" → "$1"=15 "$2"=coffee
+            echo "logged: $*"
+          '''
+        '';
+        description = ''
+          Executable for this slash command (typically writeShellScriptBin).
+          Message args after /name are appended as argv.
+        '';
       };
       timeoutSec = lib.mkOption {
         type = lib.types.ints.positive;
@@ -162,6 +177,12 @@ let
     };
   };
 
+  runnableSettings = cmd: {
+    inherit (cmd) env;
+    command = lib.getExe cmd.package;
+    timeoutSec = cmd.timeoutSec;
+  };
+
   settingsFor = name: inst: pkgs.writeText "telegram-bots-${name}-settings.json" (builtins.toJSON {
     instance = name;
     chatIds = inst.chatIds;
@@ -171,17 +192,11 @@ let
     timezone = inst.timezone;
     context = inst.context;
     features.builtinHelp = inst.features.builtinHelp;
-    interpreter =
-      if inst.interpreter.enable then {
-        bin = lib.getExe inst.interpreter.package;
-        workspace = inst.interpreter.workspace;
-        extraArgs = inst.interpreter.extraArgs;
-      } else null;
+    defaultCommand =
+      if inst.defaultCommand != null then runnableSettings inst.defaultCommand else null;
     commands = lib.mapAttrs (_: cmd: {
-      inherit (cmd) description aliases confirm exec env;
-      passArgs = cmd.passArgs;
-      timeoutSec = cmd.timeoutSec;
-    }) inst.commands;
+      inherit (cmd) description aliases;
+    } // runnableSettings cmd) inst.commands;
   });
 
   enabledInstances = lib.filterAttrs (_: inst: inst.enable) cfg.instances;
@@ -207,17 +222,7 @@ in
     assertions = lib.mapAttrsToList (name: inst: {
       assertion = inst.chatIds != [ ];
       message = "services.telegram-bots.instances.${name}.chatIds must be non-empty.";
-    }) enabledInstances
-    ++ lib.mapAttrsToList (name: inst: {
-      assertion = !inst.interpreter.enable || (inst.interpreter.package != null && inst.interpreter.workspace != null);
-      message = "services.telegram-bots.instances.${name}.interpreter requires package and workspace when enable=true.";
-    }) enabledInstances
-    ++ lib.concatLists (lib.mapAttrsToList (name: inst:
-      lib.mapAttrsToList (cmdName: cmd: {
-        assertion = cmd.exec != [ ];
-        message = "services.telegram-bots.instances.${name}.commands.${cmdName}.exec must be non-empty.";
-      }) inst.commands
-    ) enabledInstances);
+    }) enabledInstances;
 
     home.packages = [ cfg.package ];
 

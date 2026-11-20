@@ -22,20 +22,16 @@ pub struct Settings {
     #[serde(default)]
     #[allow(dead_code)]
     pub guest_mode: bool,
-    /// Reserved: interpreters + command events.
     #[serde(default = "default_timezone")]
-    #[allow(dead_code)]
     pub timezone: String,
-    /// Opaque JSON for command runners (payers, calendar ids, …).
+    /// Opaque JSON available to command scripts via TELEGRAM_BOTS_CONTEXT.
     #[serde(default)]
-    #[allow(dead_code)]
     pub context: Value,
     #[serde(default)]
     pub features: Features,
-    /// Reserved: free-form / failed-parse interpreter.
+    /// Runs for free-form messages (no slash command). Same runner shape as commands.
     #[serde(default)]
-    #[allow(dead_code)]
-    pub interpreter: Option<InterpreterSettings>,
+    pub default_command: Option<RunnableCommand>,
     #[serde(default)]
     pub commands: BTreeMap<String, CommandSettings>,
 }
@@ -61,14 +57,16 @@ fn default_true() -> bool {
     true
 }
 
+/// Shared executable + timeout + env for slash commands and defaultCommand.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // wired in a follow-up: free-form interpreter
-pub struct InterpreterSettings {
-    pub bin: String,
-    pub workspace: String,
+pub struct RunnableCommand {
+    /// Absolute path to the executable (e.g. lib.getExe of writeShellScriptBin).
+    pub command: String,
+    #[serde(default = "default_timeout")]
+    pub timeout_sec: u64,
     #[serde(default)]
-    pub extra_args: Vec<String>,
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -77,22 +75,9 @@ pub struct CommandSettings {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
-    #[allow(dead_code)] // slash aliases + runners land next
     pub aliases: Vec<String>,
-    #[serde(default = "default_true")]
-    #[allow(dead_code)]
-    pub confirm: bool,
-    #[allow(dead_code)]
-    pub exec: Vec<String>,
-    #[serde(default = "default_true")]
-    #[allow(dead_code)]
-    pub pass_args: bool,
-    #[serde(default = "default_timeout")]
-    #[allow(dead_code)]
-    pub timeout_sec: u64,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub env: BTreeMap<String, String>,
+    #[serde(flatten)]
+    pub run: RunnableCommand,
 }
 
 fn default_timeout() -> u64 {
@@ -110,9 +95,14 @@ impl Settings {
         if settings.chat_ids.is_empty() {
             return Err("settings.chatIds must be non-empty".into());
         }
+        if let Some(default) = &settings.default_command {
+            if default.command.trim().is_empty() {
+                return Err("defaultCommand.command must be non-empty".into());
+            }
+        }
         for (name, command) in &settings.commands {
-            if command.exec.is_empty() {
-                return Err(format!("commands.{name}.exec must be non-empty"));
+            if command.run.command.trim().is_empty() {
+                return Err(format!("commands.{name}.command must be non-empty"));
             }
         }
         Ok(settings)
@@ -161,6 +151,19 @@ mod tests {
         assert!(settings.guest_mode);
         assert!(settings.features.builtin_help);
         assert_eq!(settings.timezone, "UTC");
+        assert!(settings.default_command.is_none());
+    }
+
+    #[test]
+    fn load_parses_default_command() {
+        let path = temp_settings(
+            r#"{"instance":"fam","chatIds":[1],"defaultCommand":{"command":"/bin/echo","timeoutSec":30}}"#,
+        );
+        let settings = Settings::load(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        let default = settings.default_command.unwrap();
+        assert_eq!(default.command, "/bin/echo");
+        assert_eq!(default.timeout_sec, 30);
     }
 
     #[test]
@@ -169,6 +172,16 @@ mod tests {
         let err = Settings::load(&path).unwrap_err();
         let _ = fs::remove_file(&path);
         assert!(err.contains("non-empty"));
+    }
+
+    #[test]
+    fn load_rejects_empty_command_path() {
+        let path = temp_settings(
+            r#"{"instance":"agent","chatIds":[1],"commands":{"expense":{"command":""}}}"#,
+        );
+        let err = Settings::load(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert!(err.contains("command must be non-empty"));
     }
 
     #[test]
@@ -182,7 +195,7 @@ mod tests {
             timezone: "UTC".into(),
             context: Value::Null,
             features: Features::default(),
-            interpreter: None,
+            default_command: None,
             commands: BTreeMap::new(),
         };
         assert!(settings.allows_user(Some(42)));
@@ -201,7 +214,7 @@ mod tests {
             timezone: "UTC".into(),
             context: Value::Null,
             features: Features::default(),
-            interpreter: None,
+            default_command: None,
             commands: BTreeMap::new(),
         };
         assert!(settings.allows_user(Some(7)));

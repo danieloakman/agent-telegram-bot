@@ -1,4 +1,6 @@
+mod commands;
 mod ipc;
+mod proc;
 mod service;
 mod settings;
 mod state;

@@ -63,8 +63,44 @@ CLI notify/ask/ping ignore `STATE_DIRECTORY` and use `TELEGRAM_BOTS_SOCKET` or
 Secrets stay in the consumer flake. Overlay: `overlays.default` exposes
 `pkgs.telegram-bots`.
 
-Slash commands, guest mode, interpreter, and ask multiple-choice land next;
-settings/HM options for them are already reserved.
+### Slash commands + defaultCommand
+
+Point each command at a script (e.g. `writeShellScriptBin`). Args after
+`/name` are passed through as argv. Optional `defaultCommand` runs the same
+way for free-form messages (no leading `/`):
+
+```nix
+services.telegram-bots.instances.brown-fam = {
+  enable = true;
+  chatIds = [ 123 ];
+  tokenFile = …;
+  commands.expense = {
+    description = "e.g. 15 coffee";
+    package = pkgs.writeShellScriptBin "brown-fam-expense" ''
+      set -euo pipefail
+      # /expense 15 coffee  →  $1=15 $2=coffee
+      echo "logged $*"
+    '';
+  };
+  defaultCommand = {
+    package = pkgs.writeShellScriptBin "brown-fam-default" ''
+      set -euo pipefail
+      # "trotty paid 40 lunch" → words as "$@"
+      # TELEGRAM_BOTS_COMMAND=default
+      cursor-agent -p --mode ask --trust --workspace "$WORKSPACE" "$*"
+    '';
+    timeoutSec = 180;
+    env.WORKSPACE = "/home/dano/repos/personal/dotfiles";
+  };
+};
+```
+
+Stdout (trimmed) is sent back to Telegram. Non-zero exit → error reply.
+Env always set: `TELEGRAM_BOTS_INSTANCE`, `TELEGRAM_BOTS_COMMAND` (`expense`
+or `default`), `TELEGRAM_BOTS_CHAT_ID`, `TELEGRAM_BOTS_USER_ID` (if known),
+`TELEGRAM_BOTS_TIMEZONE`, `TELEGRAM_BOTS_CONTEXT` (JSON).
+
+Guest mode and ask multiple-choice are still reserved.
 
 ## Develop
 
