@@ -1,8 +1,9 @@
 # telegram-bots
 
 Nix-configured Telegram bots: a long-poll daemon plus a unix control socket per
-instance. Every instance can **notify** and **ask** (blocking reply). Optional
-slash `commands` and guest mode are configured in Home Manager.
+instance. Every instance can **notify** and **ask** (blocking reply, optional
+inline-keyboard choices). Optional slash `commands`, `defaultCommand`, and
+`guestMode` are configured in Home Manager.
 
 Formerly `agent-telegram-bot`.
 
@@ -18,12 +19,24 @@ telegram-bots --instance agent notify --role vuln-monitor "build finished"
 # Block until a Telegram reply (or timeout)
 telegram-bots --instance agent ask --role agent --timeout 600 "Ship it?"
 
+# Ask with Confirm/Cancel buttons; stdout is the choice id
+telegram-bots --instance agent ask \
+  --choice confirm=Confirm --choice cancel=Cancel \
+  "Ship the release?"
+
+# Override destination chat (default: settings chatIds[0])
+telegram-bots --instance agent ask --chat-id 123456789 "Ping?"
+
 # Check the control socket
 telegram-bots --instance agent ping
 ```
 
 Message body can be a positional argument or stdin. `--instance` can also come
 from `TELEGRAM_BOTS_INSTANCE`.
+
+When any `--choice id=Label` is present, the ask shows an inline keyboard and
+the printed answer is the **choice id** (e.g. `confirm`). Without `--choice`,
+reply to the ask message or send `/a <answer>` as before.
 
 ## Daemon environment
 
@@ -39,13 +52,21 @@ Daemon socket: `$STATE_DIRECTORY/telegram-bots.sock` (or `TELEGRAM_BOTS_SOCKET`)
 CLI notify/ask/ping ignore `STATE_DIRECTORY` and use `TELEGRAM_BOTS_SOCKET` or
 `~/.local/state/telegram-bots-<instance>/telegram-bots.sock`.
 
+### Guest asks
+
+When a slash/`defaultCommand` script runs from a **guest** mention
+(`guestMode = true`), the daemon sets `TELEGRAM_BOTS_GUEST_QUERY_ID` in the
+script environment. The first outbound `ask` (CLI reads that env, or pass
+`--guest-query-id`) answers the guest query via `answerGuestQuery` with the
+prompt and optional inline keyboard. Later asks use normal `sendMessage`.
+Private chats with no guest id always use `sendMessage`. The daemon does **not**
+auto-ack guest mentions with a “Working…” placeholder.
+
 ## Nix / Home Manager
 
 ```nix
 {
   inputs.telegram-bots.url = "github:danieloakman/telegram-bots";
-  # During migration from the old repo name:
-  # inputs.telegram-bots.url = "github:danieloakman/telegram-bots";
 
   imports = [ inputs.telegram-bots.homeManagerModules.default ];
 
@@ -87,6 +108,9 @@ services.telegram-bots.instances.brown-fam = {
       set -euo pipefail
       # "trotty paid 40 lunch" → words as "$@"
       # TELEGRAM_BOTS_COMMAND=default
+      # Scripts can own Confirm/Cancel:
+      # choice=$(telegram-bots --instance brown-fam ask \
+      #   --choice confirm=Confirm --choice cancel=Cancel "Apply?")
       cursor-agent -p --mode ask --trust --workspace "$WORKSPACE" "$*"
     '';
     timeoutSec = 180;
@@ -95,12 +119,19 @@ services.telegram-bots.instances.brown-fam = {
 };
 ```
 
-Stdout (trimmed) is sent back to Telegram. Non-zero exit → error reply.
+Command exit / stdout:
+
+- Exit 0 + **empty** stdout → daemon sends **no** follow-up Telegram message
+- Exit 0 + non-empty stdout → send trimmed stdout
+- Non-zero → error reply (`❌ … failed: …`)
+
 Env always set: `TELEGRAM_BOTS_INSTANCE`, `TELEGRAM_BOTS_COMMAND` (`expense`
 or `default`), `TELEGRAM_BOTS_CHAT_ID`, `TELEGRAM_BOTS_USER_ID` (if known),
-`TELEGRAM_BOTS_TIMEZONE`, `TELEGRAM_BOTS_CONTEXT` (JSON).
+`TELEGRAM_BOTS_TIMEZONE`, `TELEGRAM_BOTS_CONTEXT` (JSON). Guest runs also get
+`TELEGRAM_BOTS_GUEST_QUERY_ID`.
 
-Guest mode and ask multiple-choice are still reserved.
+Set `guestMode = true` to poll `GuestMessage` and route guest text like private
+messages into slash/`defaultCommand`. When false, guest updates are ignored.
 
 ## Develop
 

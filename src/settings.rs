@@ -18,9 +18,8 @@ pub struct Settings {
     /// Chats allowed for inbound commands/guest traffic. Empty allows all chats.
     #[serde(default)]
     pub allowed_chat_ids: Vec<i64>,
-    /// Reserved: guest mention handling (answerGuestQuery).
+    /// When true, poll GuestMessage and route like private commands (with guest env).
     #[serde(default)]
-    #[allow(dead_code)]
     pub guest_mode: bool,
     #[serde(default = "default_timezone")]
     pub timezone: String,

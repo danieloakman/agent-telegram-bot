@@ -12,7 +12,7 @@ use std::thread;
 
 use clap::{Parser, Subcommand};
 
-use crate::ipc::{Request, Response};
+use crate::ipc::{AskChoice, Request, Response};
 use crate::service::App;
 use crate::settings::Settings;
 use crate::state::Shared;
@@ -50,10 +50,37 @@ enum Command {
         role: String,
         #[arg(long, default_value_t = 600)]
         timeout: u64,
+        /// Override destination chat (default: settings chatIds[0]).
+        #[arg(long)]
+        chat_id: Option<i64>,
+        /// Inline-keyboard choice as `id=Label` (repeatable). Answer is the id.
+        #[arg(long = "choice", value_name = "ID=LABEL", value_parser = parse_choice)]
+        choices: Vec<AskChoice>,
+        /// Guest query id for answerGuestQuery (default: TELEGRAM_BOTS_GUEST_QUERY_ID).
+        #[arg(long, env = "TELEGRAM_BOTS_GUEST_QUERY_ID")]
+        guest_query_id: Option<String>,
         text: Option<String>,
     },
     /// Check the daemon control socket.
     Ping,
+}
+
+fn parse_choice(raw: &str) -> Result<AskChoice, String> {
+    let (id, label) = raw
+        .split_once('=')
+        .ok_or_else(|| String::from("expected id=Label"))?;
+    let id = id.trim();
+    let label = label.trim();
+    if id.is_empty() || label.is_empty() {
+        return Err("expected non-empty id=Label".into());
+    }
+    if id.contains(':') {
+        return Err("choice id must not contain ':'".into());
+    }
+    Ok(AskChoice {
+        id: id.to_string(),
+        label: label.to_string(),
+    })
 }
 
 fn main() {
@@ -82,6 +109,9 @@ fn run() -> Result<(), String> {
         Command::Ask {
             role,
             timeout,
+            chat_id,
+            choices,
+            guest_query_id,
             text,
         } => {
             let text = message_text(text)?;
@@ -91,7 +121,13 @@ fn run() -> Result<(), String> {
                     text,
                     role: Some(role),
                     timeout_sec: timeout,
-                    choices: None,
+                    choices: if choices.is_empty() {
+                        None
+                    } else {
+                        Some(choices)
+                    },
+                    chat_id,
+                    guest_query_id,
                 },
             )?;
             if !response.ok {
@@ -202,4 +238,19 @@ fn socket_path(instance: Option<&str>, prefer_state_directory: bool) -> Result<P
 
 fn env_var(key: &str) -> Result<String, String> {
     std::env::var(key).map_err(|_| format!("{key} is not set"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_choice_id_label() {
+        let choice = parse_choice("confirm=Confirm").unwrap();
+        assert_eq!(choice.id, "confirm");
+        assert_eq!(choice.label, "Confirm");
+        assert!(parse_choice("nocolon").is_err());
+        assert!(parse_choice("=Label").is_err());
+        assert!(parse_choice("a:b=Label").is_err());
+    }
 }

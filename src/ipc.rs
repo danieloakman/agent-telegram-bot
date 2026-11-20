@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::service::App;
+use crate::service::{App, AskOpts};
 use crate::state::Shared;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,11 +28,17 @@ pub enum Request {
         /// Multiple-choice options. Empty/omitted ⇒ free-text ask.
         #[serde(default)]
         choices: Option<Vec<AskChoice>>,
+        /// Override destination chat; omit ⇒ settings.chatIds[0].
+        #[serde(default)]
+        chat_id: Option<i64>,
+        /// When set and not yet consumed, first ask uses answerGuestQuery.
+        #[serde(default)]
+        guest_query_id: Option<String>,
     },
     Ping,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AskChoice {
     pub id: String,
@@ -153,21 +159,23 @@ fn handle_client(stream: UnixStream, app: &App, state: &Shared) -> Result<(), St
             role,
             timeout_sec,
             choices,
+            chat_id,
+            guest_query_id,
         } => {
             let choices = choices.unwrap_or_default();
-            if !choices.is_empty() {
-                // Inline-keyboard asks land in a follow-up change; reject clearly for now.
-                Response::err("ask choices are not implemented yet")
-            } else {
-                match app.ask(
-                    role.as_deref(),
-                    &text,
-                    Duration::from_secs(timeout_sec),
-                    state,
-                ) {
-                    Ok((ask_id, answer)) => Response::ok_ask(ask_id, answer),
-                    Err(err) => Response::err(err),
-                }
+            match app.ask(
+                state,
+                AskOpts {
+                    role: role.as_deref(),
+                    text: &text,
+                    timeout: Duration::from_secs(timeout_sec),
+                    chat_id,
+                    choices: &choices,
+                    guest_query_id: guest_query_id.as_deref(),
+                },
+            ) {
+                Ok((ask_id, answer)) => Response::ok_ask(ask_id, answer),
+                Err(err) => Response::err(err),
             }
         }
     };
@@ -232,11 +240,61 @@ mod tests {
                 role,
                 timeout_sec,
                 choices,
+                chat_id,
+                guest_query_id,
             } => {
                 assert_eq!(text, "Ship it?");
                 assert_eq!(role.as_deref(), Some("agent"));
                 assert_eq!(timeout_sec, 600);
                 assert!(choices.is_none());
+                assert!(chat_id.is_none());
+                assert!(guest_query_id.is_none());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_ask_with_choices_and_chat_id() {
+        let request = Request::Ask {
+            text: "Ship it?".into(),
+            role: Some("agent".into()),
+            timeout_sec: 120,
+            choices: Some(vec![
+                AskChoice {
+                    id: "confirm".into(),
+                    label: "Confirm".into(),
+                },
+                AskChoice {
+                    id: "cancel".into(),
+                    label: "Cancel".into(),
+                },
+            ]),
+            chat_id: Some(42),
+            guest_query_id: Some("gq-1".into()),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""cmd":"ask""#));
+        assert!(json.contains(r#""id":"confirm""#));
+        assert!(json.contains(r#""label":"Confirm""#));
+        assert!(json.contains(r#""chat_id":42"#));
+        assert!(json.contains(r#""guest_query_id":"gq-1""#));
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Request::Ask {
+                choices,
+                chat_id,
+                guest_query_id,
+                timeout_sec,
+                ..
+            } => {
+                assert_eq!(timeout_sec, 120);
+                assert_eq!(chat_id, Some(42));
+                assert_eq!(guest_query_id.as_deref(), Some("gq-1"));
+                let choices = choices.expect("choices");
+                assert_eq!(choices.len(), 2);
+                assert_eq!(choices[0].id, "confirm");
+                assert_eq!(choices[1].label, "Cancel");
             }
             other => panic!("unexpected {other:?}"),
         }
