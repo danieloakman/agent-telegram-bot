@@ -506,11 +506,10 @@ fn format_message(
 ) -> String {
     let role = role.unwrap_or("agent");
     match ask_id {
-        Some(id) if has_choices => {
-            format!("[{role}] ask `{id}`\n\n{text}\n\nChoose a button below.")
-        }
-        Some(id) => {
-            format!("[{role}] ask `{id}`\n\n{text}\n\nReply to this message, or `/a <answer>`.")
+        // Choice asks: prompt only — buttons carry the action; no [role]/id chrome.
+        Some(_) if has_choices => text.to_string(),
+        Some(_) => {
+            format!("{text}\n\nReply to this message, or `/a <answer>`.")
         }
         None => format!("[{role}]\n{text}"),
     }
@@ -549,18 +548,15 @@ mod tests {
     }
 
     #[test]
-    fn format_message_ask_includes_id_and_hint() {
+    fn format_message_ask_is_prompt_plus_reply_hint() {
         let body = format_message(Some("agent"), "Ship it?", Some("abcd1234"), false);
-        assert!(body.starts_with("[agent] ask `abcd1234`"));
-        assert!(body.contains("Ship it?"));
-        assert!(body.contains("/a <answer>"));
+        assert_eq!(body, "Ship it?\n\nReply to this message, or `/a <answer>`.");
     }
 
     #[test]
-    fn format_message_choice_ask_hints_buttons() {
-        let body = format_message(Some("agent"), "Ship it?", Some("abcd1234"), true);
-        assert!(body.contains("Choose a button below."));
-        assert!(!body.contains("/a <answer>"));
+    fn format_message_choice_ask_is_prompt_only() {
+        let body = format_message(Some("agent"), "Add task?\nhi", Some("abcd1234"), true);
+        assert_eq!(body, "Add task?\nhi");
     }
 
     #[test]
