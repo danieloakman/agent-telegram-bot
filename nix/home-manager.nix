@@ -252,7 +252,8 @@ in
           PrivateTmp = true;
           RestrictSUIDSGID = true;
           LockPersonality = true;
-          MemoryDenyWriteExecute = true;
+          # Off: command runners (e.g. cursor-agent / Node V8) need W^X.
+          MemoryDenyWriteExecute = false;
           RestrictRealtime = true;
           SystemCallArchitectures = "native";
         };
