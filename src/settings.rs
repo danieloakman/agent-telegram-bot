@@ -1,16 +1,102 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
+use serde_json::Value;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
-    /// Destination chats for send/ask (usually a single private chat with the bot).
+    /// Instance id (attrs key under services.telegram-bots.instances).
+    pub instance: String,
+    /// Destination chats for notify/ask (usually a single private chat with the bot).
     pub chat_ids: Vec<i64>,
-    /// Users allowed to answer asks. Empty allows every user in those chats.
+    /// Users allowed to answer asks / run commands. Empty allows every user in allowed chats.
     #[serde(default)]
     pub allowed_user_ids: Vec<i64>,
+    /// Chats allowed for inbound commands/guest traffic. Empty allows all chats.
+    #[serde(default)]
+    pub allowed_chat_ids: Vec<i64>,
+    /// Reserved: guest mention handling (answerGuestQuery).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub guest_mode: bool,
+    /// Reserved: interpreters + command events.
+    #[serde(default = "default_timezone")]
+    #[allow(dead_code)]
+    pub timezone: String,
+    /// Opaque JSON for command runners (payers, calendar ids, …).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub context: Value,
+    #[serde(default)]
+    pub features: Features,
+    /// Reserved: free-form / failed-parse interpreter.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub interpreter: Option<InterpreterSettings>,
+    #[serde(default)]
+    pub commands: BTreeMap<String, CommandSettings>,
+}
+
+fn default_timezone() -> String {
+    "UTC".into()
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Features {
+    #[serde(default = "default_true")]
+    pub builtin_help: bool,
+}
+
+impl Default for Features {
+    fn default() -> Self {
+        Self { builtin_help: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // wired in a follow-up: free-form interpreter
+pub struct InterpreterSettings {
+    pub bin: String,
+    pub workspace: String,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandSettings {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    #[allow(dead_code)] // slash aliases + runners land next
+    pub aliases: Vec<String>,
+    #[serde(default = "default_true")]
+    #[allow(dead_code)]
+    pub confirm: bool,
+    #[allow(dead_code)]
+    pub exec: Vec<String>,
+    #[serde(default = "default_true")]
+    #[allow(dead_code)]
+    pub pass_args: bool,
+    #[serde(default = "default_timeout")]
+    #[allow(dead_code)]
+    pub timeout_sec: u64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub env: BTreeMap<String, String>,
+}
+
+fn default_timeout() -> u64 {
+    60
 }
 
 impl Settings {
@@ -18,8 +104,16 @@ impl Settings {
         let text = fs::read_to_string(path).map_err(|err| format!("reading settings: {err}"))?;
         let settings: Self =
             serde_json::from_str(&text).map_err(|err| format!("parsing settings: {err}"))?;
+        if settings.instance.trim().is_empty() {
+            return Err("settings.instance must be non-empty".into());
+        }
         if settings.chat_ids.is_empty() {
             return Err("settings.chatIds must be non-empty".into());
+        }
+        for (name, command) in &settings.commands {
+            if command.exec.is_empty() {
+                return Err(format!("commands.{name}.exec must be non-empty"));
+            }
         }
         Ok(settings)
     }
@@ -33,6 +127,10 @@ impl Settings {
         };
         self.allowed_user_ids.contains(&(uid as i64))
     }
+
+    pub fn allows_chat(&self, chat_id: i64) -> bool {
+        self.allowed_chat_ids.is_empty() || self.allowed_chat_ids.contains(&chat_id)
+    }
 }
 
 #[cfg(test)]
@@ -45,23 +143,29 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("agent-telegram-bot-settings-{nanos}.json"));
+        let path = std::env::temp_dir().join(format!("telegram-bots-settings-{nanos}.json"));
         fs::write(&path, contents).expect("write temp settings");
         path
     }
 
     #[test]
     fn load_parses_camel_case() {
-        let path = temp_settings(r#"{"chatIds":[1,2],"allowedUserIds":[9]}"#);
+        let path = temp_settings(
+            r#"{"instance":"agent","chatIds":[1,2],"allowedUserIds":[9],"guestMode":true}"#,
+        );
         let settings = Settings::load(&path).unwrap();
         let _ = fs::remove_file(&path);
+        assert_eq!(settings.instance, "agent");
         assert_eq!(settings.chat_ids, vec![1, 2]);
         assert_eq!(settings.allowed_user_ids, vec![9]);
+        assert!(settings.guest_mode);
+        assert!(settings.features.builtin_help);
+        assert_eq!(settings.timezone, "UTC");
     }
 
     #[test]
     fn load_rejects_empty_chat_ids() {
-        let path = temp_settings(r#"{"chatIds":[]}"#);
+        let path = temp_settings(r#"{"instance":"agent","chatIds":[]}"#);
         let err = Settings::load(&path).unwrap_err();
         let _ = fs::remove_file(&path);
         assert!(err.contains("non-empty"));
@@ -70,21 +174,40 @@ mod tests {
     #[test]
     fn allows_user_empty_list_allows_all() {
         let settings = Settings {
+            instance: "agent".into(),
             chat_ids: vec![1],
             allowed_user_ids: vec![],
+            allowed_chat_ids: vec![],
+            guest_mode: false,
+            timezone: "UTC".into(),
+            context: Value::Null,
+            features: Features::default(),
+            interpreter: None,
+            commands: BTreeMap::new(),
         };
         assert!(settings.allows_user(Some(42)));
         assert!(settings.allows_user(None));
+        assert!(settings.allows_chat(99));
     }
 
     #[test]
     fn allows_user_filters_when_configured() {
         let settings = Settings {
+            instance: "agent".into(),
             chat_ids: vec![1],
             allowed_user_ids: vec![7, 8],
+            allowed_chat_ids: vec![1],
+            guest_mode: false,
+            timezone: "UTC".into(),
+            context: Value::Null,
+            features: Features::default(),
+            interpreter: None,
+            commands: BTreeMap::new(),
         };
         assert!(settings.allows_user(Some(7)));
         assert!(!settings.allows_user(Some(9)));
         assert!(!settings.allows_user(None));
+        assert!(settings.allows_chat(1));
+        assert!(!settings.allows_chat(2));
     }
 }

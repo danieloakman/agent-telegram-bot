@@ -20,7 +20,10 @@ impl App {
     }
 
     pub fn run_poll(&self, state: Arc<Shared>) -> Result<(), String> {
-        log::info!("polling agent telegram updates");
+        log::info!(
+            "polling telegram updates instance={}",
+            self.settings.instance
+        );
         loop {
             if let Err(err) = self.poll_once(&state) {
                 log::error!("poll failed: {err}");
@@ -50,7 +53,7 @@ impl App {
 
     fn handle_message(&self, message: Message, state: &Shared) -> Result<(), String> {
         let chat_id = message.chat.id;
-        if !self.settings.chat_ids.contains(&chat_id) {
+        if !self.settings.allows_chat(chat_id) && !self.settings.chat_ids.contains(&chat_id) {
             return Ok(());
         }
         let user_id = message.from.as_ref().map(|u| u.id);
@@ -109,18 +112,33 @@ impl App {
             return Ok(());
         }
 
-        if text == "/help" {
-            let _ = self.telegram.send(
-                chat_id,
-                "Agent bridge.\n\
-                 Automation sends notices and asks here.\n\
-                 Reply to an ask, or send `/a <answer>`.",
-            );
+        if text == "/help" && self.settings.features.builtin_help {
+            let _ = self.telegram.send(chat_id, &self.help_text());
         }
         Ok(())
     }
 
-    pub fn send(&self, role: Option<&str>, text: &str) -> Result<i32, String> {
+    fn help_text(&self) -> String {
+        let mut lines = vec![
+            format!("Telegram bot `{}`.", self.settings.instance),
+            "Automation can notify and ask here.".into(),
+            "Reply to an ask, or send `/a <answer>`.".into(),
+        ];
+        if !self.settings.commands.is_empty() {
+            lines.push(String::new());
+            lines.push("Commands:".into());
+            for (name, command) in &self.settings.commands {
+                if command.description.is_empty() {
+                    lines.push(format!("/{name}"));
+                } else {
+                    lines.push(format!("/{name} — {}", command.description));
+                }
+            }
+        }
+        lines.join("\n")
+    }
+
+    pub fn notify(&self, role: Option<&str>, text: &str) -> Result<i32, String> {
         let body = format_message(role, text, None);
         let chat_id = self.primary_chat()?;
         self.telegram.send(chat_id, &body)

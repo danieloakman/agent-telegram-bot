@@ -13,7 +13,8 @@ use crate::state::Shared;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
-    Send {
+    #[serde(alias = "send")]
+    Notify {
         text: String,
         #[serde(default)]
         role: Option<String>,
@@ -24,8 +25,18 @@ pub enum Request {
         role: Option<String>,
         #[serde(default = "default_timeout")]
         timeout_sec: u64,
+        /// Multiple-choice options. Empty/omitted ⇒ free-text ask.
+        #[serde(default)]
+        choices: Option<Vec<AskChoice>>,
     },
     Ping,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskChoice {
+    pub id: String,
+    pub label: String,
 }
 
 fn default_timeout() -> u64 {
@@ -47,7 +58,7 @@ pub struct Response {
 }
 
 impl Response {
-    fn ok_send(message_id: i32) -> Self {
+    fn ok_notify(message_id: i32) -> Self {
         Self {
             ok: true,
             error: None,
@@ -133,23 +144,32 @@ fn handle_client(stream: UnixStream, app: &App, state: &Shared) -> Result<(), St
             ask_id: None,
             answer: None,
         },
-        Request::Send { text, role } => match app.send(role.as_deref(), &text) {
-            Ok(message_id) => Response::ok_send(message_id),
+        Request::Notify { text, role } => match app.notify(role.as_deref(), &text) {
+            Ok(message_id) => Response::ok_notify(message_id),
             Err(err) => Response::err(err),
         },
         Request::Ask {
             text,
             role,
             timeout_sec,
-        } => match app.ask(
-            role.as_deref(),
-            &text,
-            Duration::from_secs(timeout_sec),
-            state,
-        ) {
-            Ok((ask_id, answer)) => Response::ok_ask(ask_id, answer),
-            Err(err) => Response::err(err),
-        },
+            choices,
+        } => {
+            let choices = choices.unwrap_or_default();
+            if !choices.is_empty() {
+                // Inline-keyboard asks land in a follow-up change; reject clearly for now.
+                Response::err("ask choices are not implemented yet")
+            } else {
+                match app.ask(
+                    role.as_deref(),
+                    &text,
+                    Duration::from_secs(timeout_sec),
+                    state,
+                ) {
+                    Ok((ask_id, answer)) => Response::ok_ask(ask_id, answer),
+                    Err(err) => Response::err(err),
+                }
+            }
+        }
     };
     let mut writer = stream;
     let body = serde_json::to_string(&response).map_err(|e| e.to_string())?;
@@ -175,19 +195,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_send_round_trip() {
-        let request = Request::Send {
+    fn request_notify_round_trip() {
+        let request = Request::Notify {
             text: "hello".into(),
             role: Some("agent".into()),
         };
         let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains(r#""cmd":"send""#));
+        assert!(json.contains(r#""cmd":"notify""#));
         let parsed: Request = serde_json::from_str(&json).unwrap();
         match parsed {
-            Request::Send { text, role } => {
+            Request::Notify { text, role } => {
                 assert_eq!(text, "hello");
                 assert_eq!(role.as_deref(), Some("agent"));
             }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_accepts_legacy_send_alias() {
+        let parsed: Request =
+            serde_json::from_str(r#"{"cmd":"send","text":"hi","role":"agent"}"#).unwrap();
+        match parsed {
+            Request::Notify { text, .. } => assert_eq!(text, "hi"),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -201,10 +231,12 @@ mod tests {
                 text,
                 role,
                 timeout_sec,
+                choices,
             } => {
                 assert_eq!(text, "Ship it?");
                 assert_eq!(role.as_deref(), Some("agent"));
                 assert_eq!(timeout_sec, 600);
+                assert!(choices.is_none());
             }
             other => panic!("unexpected {other:?}"),
         }

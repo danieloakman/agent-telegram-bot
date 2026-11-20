@@ -18,10 +18,14 @@ use crate::telegram::Telegram;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "agent-telegram-bot",
-    about = "Notify/ask bridge for agents via Telegram"
+    name = "telegram-bots",
+    about = "Nix-configured Telegram bots (notify / ask / optional commands)"
 )]
 struct Cli {
+    /// Instance id (matches services.telegram-bots.instances.<name>).
+    #[arg(long, env = "TELEGRAM_BOTS_INSTANCE")]
+    instance: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -31,7 +35,7 @@ enum Command {
     /// Long-poll Telegram and serve the control socket (systemd default).
     Daemon,
     /// Fire-and-forget notice.
-    Send {
+    Notify {
         /// Role tag shown as [role] in the message.
         #[arg(long, default_value = "agent")]
         role: String,
@@ -60,14 +64,18 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
+    let instance = cli.instance.clone();
     match cli.command.unwrap_or(Command::Daemon) {
-        Command::Daemon => run_daemon(),
-        Command::Send { role, text } => {
+        Command::Daemon => run_daemon(instance),
+        Command::Notify { role, text } => {
             let text = message_text(text)?;
-            client_call(Request::Send {
-                text,
-                role: Some(role),
-            })
+            client_call(
+                instance.as_deref(),
+                Request::Notify {
+                    text,
+                    role: Some(role),
+                },
+            )
         }
         Command::Ask {
             role,
@@ -75,11 +83,15 @@ fn run() -> Result<(), String> {
             text,
         } => {
             let text = message_text(text)?;
-            let response = raw_call(Request::Ask {
-                text,
-                role: Some(role),
-                timeout_sec: timeout,
-            })?;
+            let response = raw_call(
+                instance.as_deref(),
+                Request::Ask {
+                    text,
+                    role: Some(role),
+                    timeout_sec: timeout,
+                    choices: None,
+                },
+            )?;
             if !response.ok {
                 return Err(response.error.unwrap_or_else(|| "ask failed".into()));
             }
@@ -87,7 +99,7 @@ fn run() -> Result<(), String> {
             println!("{answer}");
             Ok(())
         }
-        Command::Ping => client_call(Request::Ping),
+        Command::Ping => client_call(instance.as_deref(), Request::Ping),
     }
 }
 
@@ -108,8 +120,8 @@ fn message_text(arg: Option<String>) -> Result<String, String> {
     Ok(text)
 }
 
-fn client_call(request: Request) -> Result<(), String> {
-    let response = raw_call(request)?;
+fn client_call(instance: Option<&str>, request: Request) -> Result<(), String> {
+    let response = raw_call(instance, request)?;
     if !response.ok {
         return Err(response.error.unwrap_or_else(|| "request failed".into()));
     }
@@ -121,51 +133,69 @@ fn client_call(request: Request) -> Result<(), String> {
     Ok(())
 }
 
-fn raw_call(request: Request) -> Result<Response, String> {
+fn raw_call(instance: Option<&str>, request: Request) -> Result<Response, String> {
     // CLI must not inherit a foreign STATE_DIRECTORY (e.g. another systemd unit).
-    let socket = socket_path(/* prefer_state_directory */ false)?;
+    let socket = socket_path(instance, /* prefer_state_directory */ false)?;
     ipc::call(&socket, &request)
 }
 
-fn run_daemon() -> Result<(), String> {
-    let token_path = env_var("AGENT_TELEGRAM_BOT_TOKEN_FILE")?;
+fn run_daemon(instance: Option<String>) -> Result<(), String> {
+    let instance = instance
+        .or_else(|| std::env::var("TELEGRAM_BOTS_INSTANCE").ok())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| String::from("daemon requires --instance or TELEGRAM_BOTS_INSTANCE"))?;
+    let token_path = env_var("TELEGRAM_BOTS_TOKEN_FILE")?;
     let token = std::fs::read_to_string(&token_path)
         .map_err(|err| format!("reading telegram token: {err}"))?;
     let token = token.trim();
     if token.is_empty() || token == "REPLACE_ME" {
-        return Err("agent_telegram_bot_token is missing (set sops secret)".into());
+        return Err("telegram bot token is missing (set tokenFile / sops secret)".into());
     }
-    let settings = Settings::load(Path::new(&env_var("AGENT_TELEGRAM_BOT_SETTINGS")?))?;
+    let settings = Settings::load(Path::new(&env_var("TELEGRAM_BOTS_SETTINGS")?))?;
+    if settings.instance != instance {
+        log::warn!(
+            "TELEGRAM_BOTS_INSTANCE={instance} differs from settings.instance={}",
+            settings.instance
+        );
+    }
     let state_dir = env_var("STATE_DIRECTORY")?;
     let state = Shared::load(Path::new(&state_dir))?;
-    let socket = socket_path(/* prefer_state_directory */ true)?;
+    let socket = socket_path(Some(&instance), /* prefer_state_directory */ true)?;
     let app = Arc::new(App::new(settings, Telegram::new(token)));
 
     let app_ipc = Arc::clone(&app);
     let state_ipc = Arc::clone(&state);
+    let socket_ipc = socket.clone();
     thread::spawn(move || {
-        if let Err(err) = ipc::listen(&socket, app_ipc, state_ipc) {
+        if let Err(err) = ipc::listen(&socket_ipc, app_ipc, state_ipc) {
             log::error!("ipc listener exited: {err}");
             std::process::exit(1);
         }
     });
 
+    log::info!(
+        "starting daemon instance={instance} socket={}",
+        socket.display()
+    );
     app.run_poll(state)
 }
 
-fn socket_path(prefer_state_directory: bool) -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var("AGENT_TELEGRAM_BOT_SOCKET") {
+fn socket_path(instance: Option<&str>, prefer_state_directory: bool) -> Result<PathBuf, String> {
+    if let Ok(path) = std::env::var("TELEGRAM_BOTS_SOCKET") {
         return Ok(PathBuf::from(path));
     }
     if prefer_state_directory {
         if let Ok(state) = std::env::var("STATE_DIRECTORY") {
-            return Ok(PathBuf::from(state).join("agent-telegram-bot.sock"));
+            return Ok(PathBuf::from(state).join("telegram-bots.sock"));
         }
     }
+    let instance = instance.ok_or_else(|| {
+        String::from("CLI requires --instance (or TELEGRAM_BOTS_INSTANCE / TELEGRAM_BOTS_SOCKET)")
+    })?;
     let home = std::env::var("HOME").map_err(|_| String::from("HOME is not set"))?;
     let state_home =
         std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| format!("{home}/.local/state"));
-    Ok(PathBuf::from(state_home).join("agent-telegram-bot/agent-telegram-bot.sock"))
+    Ok(PathBuf::from(state_home).join(format!("telegram-bots-{instance}/telegram-bots.sock")))
 }
 
 fn env_var(key: &str) -> Result<String, String> {
