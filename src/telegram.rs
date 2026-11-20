@@ -5,7 +5,8 @@ use frankenstein::inline_mode::{
     InlineQueryResult, InlineQueryResultArticle, InputTextMessageContent,
 };
 use frankenstein::methods::{
-    AnswerCallbackQueryParams, AnswerGuestQueryParams, GetUpdatesParams, SendMessageParams,
+    AnswerCallbackQueryParams, AnswerGuestQueryParams, EditMessageTextParams, GetUpdatesParams,
+    SendMessageParams,
 };
 use frankenstein::types::{AllowedUpdate, InlineKeyboardButton, InlineKeyboardMarkup, ReplyMarkup};
 use frankenstein::updates::Update;
@@ -18,6 +19,13 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(70);
 
 pub struct Telegram {
     bot: Bot,
+}
+
+/// Where an ask message lives (private chat or guest/inline).
+#[derive(Clone, Debug)]
+pub enum EditTarget {
+    Chat { chat_id: i64, message_id: i32 },
+    Inline(String),
 }
 
 impl Telegram {
@@ -105,6 +113,40 @@ impl Telegram {
             .map(|_| ())
             .map_err(|err| err.to_string())
     }
+
+    pub fn edit(
+        &self,
+        target: &EditTarget,
+        text: &str,
+        markup: Option<InlineKeyboardMarkup>,
+    ) -> Result<(), String> {
+        let params = match target {
+            EditTarget::Inline(id) => EditMessageTextParams::builder()
+                .text(clip(text))
+                .maybe_reply_markup(markup.clone())
+                .inline_message_id(id)
+                .build(),
+            EditTarget::Chat {
+                chat_id,
+                message_id,
+            } => EditMessageTextParams::builder()
+                .text(clip(text))
+                .maybe_reply_markup(markup)
+                .chat_id(*chat_id)
+                .message_id(*message_id)
+                .build(),
+        };
+        self.bot
+            .edit_message_text(&params)
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+}
+
+pub fn empty_keyboard() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(Vec::new())
+        .build()
 }
 
 pub fn choice_keyboard(ask_id: &str, choices: &[AskChoice]) -> InlineKeyboardMarkup {

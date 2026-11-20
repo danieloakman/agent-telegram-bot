@@ -12,7 +12,7 @@ use crate::ipc::AskChoice;
 use crate::proc::{self, ProcOutput};
 use crate::settings::{RunnableCommand, Settings};
 use crate::state::{PendingAsk, Shared};
-use crate::telegram::{self, Telegram};
+use crate::telegram::{self, EditTarget, Telegram};
 
 pub struct App {
     settings: Settings,
@@ -119,12 +119,15 @@ impl App {
                 if let Some(ask) = state.pending_ask(&ask_id) {
                     if ask.choice_ids.is_empty() {
                         let answer = strip_answer_prefix(text).to_string();
+                        let target = ask_edit_target(&ask);
                         if state.complete_ask(&ask_id, Ok(answer.clone())) {
-                            let _ = self.telegram.send(
-                                chat_id,
-                                &format!("✅ recorded answer for `{ask_id}`"),
-                                None,
-                            );
+                            if let Some(target) = target {
+                                let _ = self.telegram.edit(
+                                    &target,
+                                    &format!("✅ recorded answer for `{ask_id}`"),
+                                    Some(telegram::empty_keyboard()),
+                                );
+                            }
                         }
                         return Ok(());
                     }
@@ -155,12 +158,15 @@ impl App {
                 let _ = self.telegram.send(chat_id, "No open ask to answer.", None);
                 return Ok(());
             };
+            let target = state.pending_ask(&ask_id).as_ref().and_then(ask_edit_target);
             if state.complete_ask(&ask_id, Ok(answer.to_string())) {
-                let _ = self.telegram.send(
-                    chat_id,
-                    &format!("✅ recorded answer for `{ask_id}`"),
-                    None,
-                );
+                if let Some(target) = target {
+                    let _ = self.telegram.edit(
+                        &target,
+                        &format!("✅ recorded answer for `{ask_id}`"),
+                        Some(telegram::empty_keyboard()),
+                    );
+                }
             }
             return Ok(());
         }
@@ -241,10 +247,18 @@ impl App {
                 .answer_callback(&callback.id, Some("Not allowed."));
             return Ok(());
         }
+        let settle = settle_choice_text(&choice_id, ask.choice_label(&choice_id));
+        let target = ask_edit_target(&ask).or_else(|| callback_edit_target(&callback));
         if state.complete_ask(&ask_id, Ok(choice_id.clone())) {
-            let _ = self
-                .telegram
-                .answer_callback(&callback.id, Some(&choice_id));
+            let _ = self.telegram.answer_callback(&callback.id, Some(&settle));
+            if let Some(target) = target {
+                if let Err(err) =
+                    self.telegram
+                        .edit(&target, &settle, Some(telegram::empty_keyboard()))
+                {
+                    log::warn!("failed to settle ask message: {err}");
+                }
+            }
         } else {
             let _ = self
                 .telegram
@@ -357,13 +371,15 @@ impl App {
         let (message_id, inline_message_id) =
             self.send_ask(chat_id, opts.guest_query_id, &body, markup, state)?;
 
+        let (choice_ids, choice_labels) = PendingAsk::from_choices(opts.choices);
         let ask = PendingAsk {
             id: ask_id.clone(),
             role: opts.role.unwrap_or("agent").to_string(),
             chat_id,
             message_id,
             inline_message_id,
-            choice_ids: opts.choices.iter().map(|c| c.id.clone()).collect(),
+            choice_ids,
+            choice_labels,
             created: now_unix_secs(),
         };
         let waiter = state.register_ask(ask);
@@ -415,7 +431,70 @@ pub fn command_follow_up(label: &str, result: Result<ProcOutput, String>) -> Opt
                 Some(text.to_string())
             }
         }
-        Err(err) => Some(format!("❌ {label} failed: {err}")),
+        Err(err) => Some(format!("❌ {label} failed: {}", sanitize_command_error(&err))),
+    }
+}
+
+/// Keep Telegram free of native crash dumps / huge stderr blobs.
+pub fn sanitize_command_error(detail: &str) -> String {
+    let trimmed = detail.trim();
+    if trimmed.is_empty() {
+        return "unknown error".into();
+    }
+    if looks_like_crash_dump(trimmed) {
+        log::error!("command crash dump suppressed from Telegram:\n{trimmed}");
+        return "command crashed — see journalctl for details".into();
+    }
+    const MAX_CHARS: usize = 400;
+    let mut out: String = trimmed.chars().take(MAX_CHARS).collect();
+    if trimmed.chars().count() > MAX_CHARS {
+        out.push('…');
+    }
+    out
+}
+
+fn looks_like_crash_dump(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("fatal error")
+        || lower.contains("v8_fatal")
+        || lower.contains("native frames:")
+        || lower.contains("failuremessage object")
+        || lower.contains("trace/breakpoint trap")
+        || text.lines().count() > 12
+}
+
+fn settle_choice_text(choice_id: &str, label: Option<&str>) -> String {
+    match choice_id {
+        "cancel" => "Cancelled.".into(),
+        "confirm" => "Confirmed.".into(),
+        _ => match label {
+            Some(label) if !label.is_empty() => format!("Chose: {label}"),
+            _ => format!("Chose: {choice_id}"),
+        },
+    }
+}
+
+fn ask_edit_target(ask: &PendingAsk) -> Option<EditTarget> {
+    if let Some(inline_id) = &ask.inline_message_id {
+        return Some(EditTarget::Inline(inline_id.clone()));
+    }
+    ask.message_id.map(|message_id| EditTarget::Chat {
+        chat_id: ask.chat_id,
+        message_id,
+    })
+}
+
+fn callback_edit_target(callback: &CallbackQuery) -> Option<EditTarget> {
+    use frankenstein::types::MaybeInaccessibleMessage;
+    match callback.message.as_ref()? {
+        MaybeInaccessibleMessage::Message(message) => Some(EditTarget::Chat {
+            chat_id: message.chat.id,
+            message_id: message.message_id,
+        }),
+        MaybeInaccessibleMessage::InaccessibleMessage(message) => Some(EditTarget::Chat {
+            chat_id: message.chat.id,
+            message_id: message.message_id,
+        }),
     }
 }
 
@@ -537,5 +616,22 @@ mod tests {
         let msg = command_follow_up("expense", Err("boom".into())).unwrap();
         assert!(msg.contains("❌ expense failed"));
         assert!(msg.contains("boom"));
+    }
+
+    #[test]
+    fn sanitize_hides_crash_dumps() {
+        let dump = "# Fatal error in , line 0\n# FailureMessage Object: 0x1\nNative frames:\n#0 V8_Fatal\n#1 foo\n#2 bar\n#3 baz\n#4 qux\n#5 a\n#6 b\n#7 c\n#8 d\n#9 e\n#10 f\n";
+        assert_eq!(
+            sanitize_command_error(dump),
+            "command crashed — see journalctl for details"
+        );
+        assert_eq!(sanitize_command_error("missing amount"), "missing amount");
+    }
+
+    #[test]
+    fn settle_choice_text_confirm_cancel() {
+        assert_eq!(settle_choice_text("confirm", Some("Confirm")), "Confirmed.");
+        assert_eq!(settle_choice_text("cancel", Some("Cancel")), "Cancelled.");
+        assert_eq!(settle_choice_text("dan", Some("Dan")), "Chose: Dan");
     }
 }

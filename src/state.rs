@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ipc::AskChoice;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PendingAsk {
     pub id: String,
@@ -17,7 +19,25 @@ pub struct PendingAsk {
     pub inline_message_id: Option<String>,
     /// Non-empty ⇒ only callback choices complete this ask.
     pub choice_ids: Vec<String>,
+    /// Labels parallel to `choice_ids` (for settle text).
+    #[serde(default)]
+    pub choice_labels: Vec<String>,
     pub created: String,
+}
+
+impl PendingAsk {
+    pub fn choice_label(&self, choice_id: &str) -> Option<&str> {
+        self.choice_ids
+            .iter()
+            .position(|id| id == choice_id)
+            .and_then(|i| self.choice_labels.get(i).map(String::as_str))
+    }
+
+    pub fn from_choices(choices: &[AskChoice]) -> (Vec<String>, Vec<String>) {
+        let ids = choices.iter().map(|c| c.id.clone()).collect();
+        let labels = choices.iter().map(|c| c.label.clone()).collect();
+        (ids, labels)
+    }
 }
 
 pub struct AskWaiter {
@@ -209,6 +229,7 @@ mod tests {
             message_id: Some(message_id),
             inline_message_id: None,
             choice_ids: vec![],
+            choice_labels: vec![],
             created: "0".into(),
         }
     }
@@ -294,6 +315,7 @@ mod tests {
             message_id: None,
             inline_message_id: Some("inline-1".into()),
             choice_ids: vec!["confirm".into()],
+            choice_labels: vec!["Confirm".into()],
             created: "0".into(),
         };
         let _ = state.register_ask(ask);
