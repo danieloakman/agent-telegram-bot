@@ -45,7 +45,7 @@ CLI notify/ask/ping ignore `STATE_DIRECTORY` and use `TELEGRAM_BOTS_SOCKET` or
 {
   inputs.telegram-bots.url = "github:danieloakman/telegram-bots";
   # During migration from the old repo name:
-  # inputs.telegram-bots.url = "github:danieloakman/agent-telegram-bot";
+  # inputs.telegram-bots.url = "github:danieloakman/telegram-bots";
 
   imports = [ inputs.telegram-bots.homeManagerModules.default ];
 
