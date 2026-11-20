@@ -1,5 +1,6 @@
 use std::process::Command;
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use frankenstein::types::{CallbackQuery, Message};
@@ -28,12 +29,20 @@ pub struct AskOpts<'a> {
     pub guest_query_id: Option<&'a str>,
 }
 
+struct CommandCtx<'a> {
+    chat_id: i64,
+    user_id: Option<i64>,
+    guest_query_id: Option<&'a str>,
+}
+
 impl App {
     pub fn new(settings: Settings, telegram: Telegram) -> Self {
         Self { settings, telegram }
     }
 
-    pub fn run_poll(&self, state: Arc<Shared>) -> Result<(), String> {
+    /// Long-poll Telegram. Takes `Arc<Self>` so slash/default commands can run on a
+    /// background thread while this loop keeps handling ask callbacks.
+    pub fn run_poll(self: &Arc<Self>, state: Arc<Shared>) -> Result<(), String> {
         log::info!(
             "polling telegram updates instance={} guest_mode={}",
             self.settings.instance,
@@ -42,12 +51,12 @@ impl App {
         loop {
             if let Err(err) = self.poll_once(&state) {
                 log::error!("poll failed: {err}");
-                std::thread::sleep(Duration::from_secs(5));
+                thread::sleep(Duration::from_secs(5));
             }
         }
     }
 
-    fn poll_once(&self, state: &Shared) -> Result<(), String> {
+    fn poll_once(self: &Arc<Self>, state: &Arc<Shared>) -> Result<(), String> {
         let updates = self
             .telegram
             .updates(state.offset(), self.settings.guest_mode)?;
@@ -61,7 +70,7 @@ impl App {
         Ok(())
     }
 
-    fn handle(&self, update: Update, state: &Shared) -> Result<(), String> {
+    fn handle(self: &Arc<Self>, update: Update, state: &Arc<Shared>) -> Result<(), String> {
         match update.content {
             UpdateContent::Message(message) => {
                 self.handle_message(*message, state, /* guest_query_id */ None)
@@ -83,9 +92,9 @@ impl App {
     }
 
     fn handle_message(
-        &self,
+        self: &Arc<Self>,
         message: Message,
-        state: &Shared,
+        state: &Arc<Shared>,
         guest_query_id: Option<String>,
     ) -> Result<(), String> {
         let chat_id = message.chat.id;
@@ -165,11 +174,19 @@ impl App {
                 return Ok(());
             }
             if let Some((primary, command)) = commands::resolve_command(&self.settings, &name) {
-                if let Some(reply) =
-                    self.run_command(primary, &command.run, &args, chat_id, uid, guest)
-                {
-                    self.deliver_text(chat_id, guest, &reply, state);
-                }
+                // Must not block the poll loop: scripts often call `telegram-bots ask`,
+                // which needs CallbackQuery handling on this thread.
+                self.spawn_command(
+                    primary,
+                    &command.run,
+                    &args,
+                    CommandCtx {
+                        chat_id,
+                        user_id: uid,
+                        guest_query_id: guest,
+                    },
+                    state,
+                );
                 return Ok(());
             }
             self.deliver_text(
@@ -183,9 +200,17 @@ impl App {
 
         // Free-form message (no slash): optional defaultCommand.
         if let Some(default) = &self.settings.default_command {
-            if let Some(reply) = self.run_command("default", default, text, chat_id, uid, guest) {
-                self.deliver_text(chat_id, guest, &reply, state);
-            }
+            self.spawn_command(
+                "default",
+                default,
+                text,
+                CommandCtx {
+                    chat_id,
+                    user_id: uid,
+                    guest_query_id: guest,
+                },
+                state,
+            );
         }
 
         Ok(())
@@ -228,27 +253,26 @@ impl App {
         Ok(())
     }
 
-    fn run_command(
-        &self,
+    fn spawn_command(
+        self: &Arc<Self>,
         label: &str,
         command: &RunnableCommand,
         args: &str,
-        chat_id: i64,
-        user_id: Option<i64>,
-        guest_query_id: Option<&str>,
-    ) -> Option<String> {
+        ctx: CommandCtx<'_>,
+        state: &Arc<Shared>,
+    ) {
         let argv = commands::split_args(args);
         log::info!("running {label} command={} args={argv:?}", command.command);
         let mut cmd = Command::new(&command.command);
         cmd.args(&argv);
         cmd.env("TELEGRAM_BOTS_INSTANCE", &self.settings.instance);
         cmd.env("TELEGRAM_BOTS_COMMAND", label);
-        cmd.env("TELEGRAM_BOTS_CHAT_ID", chat_id.to_string());
+        cmd.env("TELEGRAM_BOTS_CHAT_ID", ctx.chat_id.to_string());
         cmd.env("TELEGRAM_BOTS_TIMEZONE", &self.settings.timezone);
-        if let Some(uid) = user_id {
+        if let Some(uid) = ctx.user_id {
             cmd.env("TELEGRAM_BOTS_USER_ID", uid.to_string());
         }
-        if let Some(gq) = guest_query_id {
+        if let Some(gq) = ctx.guest_query_id {
             cmd.env("TELEGRAM_BOTS_GUEST_QUERY_ID", gq);
         }
         let context = serde_json::to_string(&self.settings.context).unwrap_or_else(|_| "{}".into());
@@ -256,10 +280,19 @@ impl App {
         for (key, value) in &command.env {
             cmd.env(key, value);
         }
-        command_follow_up(
-            label,
-            proc::run(cmd, Duration::from_secs(command.timeout_sec)),
-        )
+
+        let app = Arc::clone(self);
+        let state = Arc::clone(state);
+        let label = label.to_string();
+        let timeout = Duration::from_secs(command.timeout_sec);
+        let chat_id = ctx.chat_id;
+        let guest = ctx.guest_query_id.map(str::to_string);
+        thread::spawn(move || {
+            let follow = command_follow_up(&label, proc::run(cmd, timeout));
+            if let Some(reply) = follow {
+                app.deliver_text(chat_id, guest.as_deref(), &reply, &state);
+            }
+        });
     }
 
     /// Send text via answerGuestQuery when the guest id is still unused; else sendMessage.
