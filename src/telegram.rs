@@ -1,10 +1,17 @@
 use std::time::Duration;
 
 use frankenstein::client_ureq::Bot;
-use frankenstein::methods::{GetUpdatesParams, SendMessageParams};
-use frankenstein::types::AllowedUpdate;
+use frankenstein::inline_mode::{
+    InlineQueryResult, InlineQueryResultArticle, InputTextMessageContent,
+};
+use frankenstein::methods::{
+    AnswerCallbackQueryParams, AnswerGuestQueryParams, GetUpdatesParams, SendMessageParams,
+};
+use frankenstein::types::{AllowedUpdate, InlineKeyboardButton, InlineKeyboardMarkup, ReplyMarkup};
 use frankenstein::updates::Update;
 use frankenstein::TelegramApi;
+
+use crate::ipc::AskChoice;
 
 const TEXT_LIMIT: usize = 3500;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(70);
@@ -29,11 +36,15 @@ impl Telegram {
         }
     }
 
-    pub fn updates(&self, offset: Option<i64>) -> Result<Vec<Update>, String> {
+    pub fn updates(&self, offset: Option<i64>, guest_mode: bool) -> Result<Vec<Update>, String> {
+        let mut allowed = vec![AllowedUpdate::Message, AllowedUpdate::CallbackQuery];
+        if guest_mode {
+            allowed.push(AllowedUpdate::GuestMessage);
+        }
         let params = GetUpdatesParams::builder()
             .maybe_offset(offset)
             .timeout(50u32)
-            .allowed_updates(vec![AllowedUpdate::Message])
+            .allowed_updates(allowed)
             .build();
         self.bot
             .get_updates(&params)
@@ -41,16 +52,88 @@ impl Telegram {
             .map_err(|err| err.to_string())
     }
 
-    pub fn send(&self, chat_id: i64, text: &str) -> Result<i32, String> {
+    pub fn send(
+        &self,
+        chat_id: i64,
+        text: &str,
+        markup: Option<InlineKeyboardMarkup>,
+    ) -> Result<i32, String> {
         let params = SendMessageParams::builder()
             .chat_id(chat_id)
             .text(clip(text))
+            .maybe_reply_markup(markup.map(ReplyMarkup::InlineKeyboardMarkup))
             .build();
         self.bot
             .send_message(&params)
             .map(|response| response.result.message_id)
             .map_err(|err| err.to_string())
     }
+
+    pub fn answer_guest(
+        &self,
+        query_id: &str,
+        text: &str,
+        markup: Option<InlineKeyboardMarkup>,
+    ) -> Result<String, String> {
+        let article = InlineQueryResultArticle::builder()
+            .id("1")
+            .title("telegram-bots")
+            .input_message_content(
+                InputTextMessageContent::builder()
+                    .message_text(clip(text))
+                    .build(),
+            )
+            .maybe_reply_markup(markup)
+            .build();
+        let params = AnswerGuestQueryParams::builder()
+            .guest_query_id(query_id)
+            .result(InlineQueryResult::from(article))
+            .build();
+        self.bot
+            .answer_guest_query(&params)
+            .map(|response| response.result.inline_message_id)
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn answer_callback(&self, callback_id: &str, text: Option<&str>) -> Result<(), String> {
+        let params = AnswerCallbackQueryParams::builder()
+            .callback_query_id(callback_id)
+            .maybe_text(text.map(str::to_string))
+            .build();
+        self.bot
+            .answer_callback_query(&params)
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+}
+
+pub fn choice_keyboard(ask_id: &str, choices: &[AskChoice]) -> InlineKeyboardMarkup {
+    let row = choices
+        .iter()
+        .map(|choice| {
+            InlineKeyboardButton::builder()
+                .text(choice.label.clone())
+                .callback_data(callback_data(ask_id, &choice.id))
+                .build()
+        })
+        .collect();
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(vec![row])
+        .build()
+}
+
+pub fn callback_data(ask_id: &str, choice_id: &str) -> String {
+    format!("a:{ask_id}:{choice_id}")
+}
+
+/// Parse `a:{ask_id}:{choice_id}` callback payloads.
+pub fn parse_choice_callback(data: &str) -> Option<(String, String)> {
+    let rest = data.strip_prefix("a:")?;
+    let (ask_id, choice_id) = rest.split_once(':')?;
+    if ask_id.is_empty() || choice_id.is_empty() {
+        return None;
+    }
+    Some((ask_id.to_string(), choice_id.to_string()))
 }
 
 fn clip(text: &str) -> String {
@@ -76,5 +159,40 @@ mod tests {
         let clipped = clip(&long);
         assert_eq!(clipped.chars().count(), TEXT_LIMIT + 1);
         assert!(clipped.ends_with('…'));
+    }
+
+    #[test]
+    fn choice_callback_round_trip() {
+        let data = callback_data("abcd1234", "confirm");
+        assert_eq!(
+            parse_choice_callback(&data),
+            Some(("abcd1234".into(), "confirm".into()))
+        );
+        assert!(parse_choice_callback("nope").is_none());
+        assert!(parse_choice_callback("a:only").is_none());
+    }
+
+    #[test]
+    fn choice_keyboard_encodes_ids() {
+        let markup = choice_keyboard(
+            "abcd1234",
+            &[
+                AskChoice {
+                    id: "confirm".into(),
+                    label: "Confirm".into(),
+                },
+                AskChoice {
+                    id: "cancel".into(),
+                    label: "Cancel".into(),
+                },
+            ],
+        );
+        assert_eq!(markup.inline_keyboard.len(), 1);
+        assert_eq!(markup.inline_keyboard[0].len(), 2);
+        assert_eq!(
+            markup.inline_keyboard[0][0].callback_data.as_deref(),
+            Some("a:abcd1234:confirm")
+        );
+        assert_eq!(markup.inline_keyboard[0][1].text, "Cancel");
     }
 }

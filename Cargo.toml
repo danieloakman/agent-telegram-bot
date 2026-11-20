@@ -1,12 +1,12 @@
 [package]
-name = "agent-telegram-bot"
-version = "0.1.0"
+name = "telegram-bots"
+version = "0.2.0"
 edition = "2021"
-description = "Notify/ask bridge for agents via Telegram"
+description = "Nix-configured Telegram bots: notify/ask plus optional slash commands"
 license = "MIT"
-repository = "https://github.com/danieloakman/agent-telegram-bot"
+repository = "https://github.com/danieloakman/telegram-bots"
 readme = "README.md"
-keywords = ["telegram", "bot", "agent", "automation"]
+keywords = ["telegram", "bot", "agent", "automation", "nix"]
 categories = ["command-line-utilities"]
 
 [dependencies]

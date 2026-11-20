@@ -1,5 +1,5 @@
 {
-  description = "Agent Telegram bot (notify + ask for automation)";
+  description = "Nix-configured Telegram bots (notify / ask / optional commands)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -14,7 +14,7 @@
     }:
     let
       overlay = final: _prev: {
-        agent-telegram-bot = final.callPackage ./nix/package.nix { };
+        telegram-bots = final.callPackage ./nix/package.nix { };
       };
     in
     (flake-utils.lib.eachDefaultSystem (
@@ -24,14 +24,14 @@
           inherit system;
           overlays = [ overlay ];
         };
-        package = pkgs.agent-telegram-bot;
+        package = pkgs.telegram-bots;
       in
       {
         packages.default = package;
 
         apps.default = {
           type = "app";
-          program = "${package}/bin/agent-telegram-bot";
+          program = "${package}/bin/telegram-bots";
         };
 
         checks.package = package;
@@ -39,7 +39,7 @@
         formatter = pkgs.nixfmt;
 
         devShells.default = pkgs.mkShell {
-          name = "agent-telegram-bot";
+          name = "telegram-bots";
           packages = with pkgs; [
             cargo
             rustc
@@ -59,7 +59,7 @@
         { lib, pkgs, ... }:
         {
           imports = [ ./nix/home-manager.nix ];
-          config.services.agent-telegram-bot.package =
+          config.services.telegram-bots.package =
             lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.default;
         };
     };
